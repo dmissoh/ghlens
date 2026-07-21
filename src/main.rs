@@ -73,6 +73,7 @@ struct Ev {
     before: String,               // push SHAs (activity feed only), for expansion
     after: String,
     commits: Option<Vec<String>>, // None = not fetched yet
+    commit_count: Option<usize>,  // total commits in the push, if known
     expanded: bool,
 }
 
@@ -83,7 +84,7 @@ impl Ev {
         let time = ts.get(11..16).unwrap_or("").to_string();
         let search = format!("{label} {actor} {detail} {extra}").to_lowercase();
         Ev { day, time, ts, actor, label, detail, glyph, color, search,
-             before: String::new(), after: String::new(), commits: None, expanded: false }
+             before: String::new(), after: String::new(), commits: None, commit_count: None, expanded: false }
     }
 
     // A push/ref-change we can diff. compare needs a real base and head, so both
@@ -128,9 +129,10 @@ fn gh_lines(host: &Option<String>, path: &str) -> Result<Vec<Value>, String> {
         .collect())
 }
 
-// Commit subjects for one push, via compare/<before>...<after> (same call the
-// `-c` mode makes: neither feed carries the commit list). First line only, cap 10.
-fn fetch_commits(host: &Option<String>, repo: &str, before: &str, after: &str) -> Vec<String> {
+// Commit subjects + total count for one push, via compare/<before>...<after>
+// (same call `-c` makes: neither feed carries the commit list). First line only,
+// cap 10 rows. Count is None on any error so a stale/wrong count isn't shown.
+fn fetch_commits(host: &Option<String>, repo: &str, before: &str, after: &str) -> (Vec<String>, Option<usize>) {
     let mut cmd = Command::new("gh");
     cmd.arg("api");
     if let Some(h) = host {
@@ -139,14 +141,15 @@ fn fetch_commits(host: &Option<String>, repo: &str, before: &str, after: &str) -
     cmd.arg(format!("repos/{repo}/compare/{before}...{after}"));
     let out = match cmd.output() {
         Ok(o) if o.status.success() => o,
-        Ok(o) => return vec![format!("(compare failed: {})", String::from_utf8_lossy(&o.stderr).trim())],
-        Err(e) => return vec![format!("(gh error: {e})")],
+        Ok(o) => return (vec![format!("(compare failed: {})", String::from_utf8_lossy(&o.stderr).trim())], None),
+        Err(e) => return (vec![format!("(gh error: {e})")], None),
     };
     let v: Value = match serde_json::from_slice(&out.stdout) {
         Ok(v) => v,
-        Err(e) => return vec![format!("(parse error: {e})")],
+        Err(e) => return (vec![format!("(parse error: {e})")], None),
     };
     let commits = v["commits"].as_array().cloned().unwrap_or_default();
+    let total = commits.len();
     let mut rows: Vec<String> = commits
         .iter()
         .take(10)
@@ -156,13 +159,13 @@ fn fetch_commits(host: &Option<String>, repo: &str, before: &str, after: &str) -
             format!("{}  {}", sha.get(0..7).unwrap_or(sha), msg.lines().next().unwrap_or(""))
         })
         .collect();
-    if commits.len() > 10 {
-        rows.push(format!("… {} more", commits.len() - 10));
+    if total > 10 {
+        rows.push(format!("… {} more", total - 10));
     }
     if rows.is_empty() {
         rows.push("(no commits)".into());
     }
-    rows
+    (rows, Some(total))
 }
 
 fn build_events(repo: &str, host: &Option<String>) -> Result<Vec<Ev>, String> {
@@ -300,7 +303,11 @@ impl App {
         }
         if self.events[i].commits.is_none() {
             let (b, a) = (self.events[i].before.clone(), self.events[i].after.clone());
-            self.events[i].commits = Some(fetch_commits(&self.host, &self.repo, &b, &a));
+            let (rows, total) = fetch_commits(&self.host, &self.repo, &b, &a);
+            self.events[i].commits = Some(rows);
+            if total.is_some() {
+                self.events[i].commit_count = total; // compare's count is authoritative
+            }
         }
         self.events[i].expanded = !self.events[i].expanded;
     }
@@ -608,17 +615,27 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) {
                 }
                 return;
             }
-            // Data rows: select; a quick second click on the same row = Enter.
+            // Data rows: select. Clicking the arrow (marker column) toggles the
+            // push directly; a quick second click anywhere on the row = Enter.
             if y > a.y {
                 let vis = (y - a.y - 1) as usize + app.state.offset();
                 if vis < app.visible().len() {
+                    app.state.select(Some(vis));
+                    let row = app.visible().get(vis).copied();
+                    let on_arrow = x >= spans[0].0 && x < spans[0].1;
+                    if on_arrow {
+                        if let Some(Row::Event(i)) = row {
+                            app.toggle_expand(i); // no-op if the row isn't a push
+                        }
+                        app.last_click = None;
+                        return;
+                    }
                     let now = Instant::now();
                     let dbl = app
                         .last_click
                         .is_some_and(|(t, r)| r == vis && now.duration_since(t) < Duration::from_millis(400));
-                    app.state.select(Some(vis));
                     if dbl {
-                        if let Some(Row::Event(i)) = app.visible().get(vis).copied() {
+                        if let Some(Row::Event(i)) = row {
                             app.toggle_expand(i);
                         }
                         app.last_click = None;
@@ -735,12 +752,21 @@ fn ui(f: &mut Frame, app: &mut App) {
             Row::Event(i) => {
                 let e = &app.events[i];
                 let mark = if e.expandable() { if e.expanded { "▾" } else { "▸" } } else { "" };
+                // Detail cell: the ref/detail, plus a dim "(N commits)" decorator
+                // when the push's commit count is known.
+                let mut detail = vec![Span::styled(e.detail.clone(), Style::default().fg(Color::Magenta))];
+                if let Some(n) = e.commit_count {
+                    detail.push(Span::styled(
+                        format!("  ({n} commit{})", if n == 1 { "" } else { "s" }),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
                 TRow::new(vec![
                     Cell::from(Span::styled(mark, Style::default().fg(Color::DarkGray))),
                     Cell::from(Span::styled(format!("{} {}", e.day, e.time), Style::default().fg(Color::DarkGray))),
                     Cell::from(Span::styled(format!("{} {}", e.glyph, e.label), Style::default().fg(e.color))),
                     Cell::from(Span::styled(e.actor.clone(), Style::default().add_modifier(Modifier::BOLD))),
-                    Cell::from(Span::styled(e.detail.clone(), Style::default().fg(Color::Magenta))),
+                    Cell::from(Line::from(detail)),
                 ])
             }
             Row::Commit(i, c) => {
@@ -844,7 +870,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         fspans.push(Span::styled(format!("   ✓ {st}"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
     }
     let help = Line::from(Span::styled(
-        " type: filter · Tab: switch column · Enter: commits · ^C: copy line · ^O: open in browser · drag │: resize · Esc: clear · ^Q: quit",
+        " type: filter · Tab: switch column · Enter or click ▸: commits · ^C: copy line · ^O: open in browser · drag │: resize · Esc: clear · ^Q: quit",
         Style::default().fg(Color::DarkGray),
     ));
     f.render_widget(Paragraph::new(vec![Line::from(fspans), help]), chunks[3]);
@@ -958,6 +984,46 @@ mod tests {
         let dump = draw(&mut app, 90, 20);
         assert!(dump.contains("first"), "commit subject rendered");
         assert!(dump.contains('▾'), "expanded marker rendered");
+    }
+
+    // Clicking the arrow (marker column) toggles a push's expansion.
+    #[test]
+    fn arrow_click_toggles() {
+        let mut app = sample();
+        app.events[0].before = "b".repeat(40);
+        app.events[0].after = "a".repeat(40);
+        app.events[0].commits = Some(vec!["abc1234  x".into()]); // pre-set so no network
+        draw(&mut app, 90, 20); // populates table_area / col_spans
+        let a = app.table_area;
+        let marker = app.col_spans()[0];
+        // Click the arrow cell on the first data row (event index 0).
+        handle_mouse(&mut app, event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: marker.0,
+            row: a.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.events[0].expanded, "arrow click should expand");
+        // Clicking away from the arrow (in the Detail column) does not toggle.
+        let detail_x = app.col_spans()[4].0;
+        handle_mouse(&mut app, event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: detail_x,
+            row: a.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.events[0].expanded, "a single body click must not collapse");
+    }
+
+    // The commit-count decorator renders when the count is known.
+    #[test]
+    fn commit_count_decorator() {
+        let mut app = sample();
+        app.events[0].commit_count = Some(3);
+        let dump = draw(&mut app, 100, 20);
+        assert!(dump.contains("(3 commits)"), "decorator missing");
+        app.events[0].commit_count = Some(1);
+        assert!(draw(&mut app, 100, 20).contains("(1 commit)"), "singular decorator missing");
     }
 
     // Copy text: event rows are tab-separated fields; commit rows copy verbatim.

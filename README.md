@@ -79,6 +79,7 @@ Piped (not a terminal) it prints the filtered rows instead of the TUI, so
 | action | does |
 |--------|------|
 | click a row | select it |
+| click the `▸`/`▾` arrow | expand/collapse that push |
 | double-click a row | same as Enter (expand/collapse a push) |
 | click a column header | focus that column's filter |
 | drag a `│` column separator | resize that column (Detail flexes to fill) |
@@ -99,10 +100,13 @@ filters. `All` matches the combined haystack (branch, actor, detail, PR head bra
 issue/PR number). The active column is highlighted in the header and named in the
 footer, e.g. `filter[Actor]:`. The CLI `filter` arg seeds the `All` filter.
 
-Push rows are marked `▸` (collapsed) / `▾` (expanded). Expanding fetches that push's
-commits via one `compare/<before>...<after>` call and splices them in as `↳` rows.
-The default view already merges PRs/issues/stars/etc (the old `-a`), so expanding a
-push gives you the full `gheac` picture.
+Push rows are marked `▸` (collapsed) / `▾` (expanded); click the arrow (or press
+Enter / double-click) to expand. Expanding fetches that push's commits via one
+`compare/<before>...<after>` call and splices them in as `↳` rows. That same call
+yields the commit count, shown as a dim `(N commits)` decorator on the push row
+which then sticks even when collapsed. (GitHub's feeds don't carry the count, so it
+only appears once a push has been expanded.) The default view already merges
+PRs/issues/stars/etc (the old `-a`), so expanding a push gives the full `gheac` view.
 
 ## Glyphs
 
@@ -112,3 +116,8 @@ push gives you the full `gheac` picture.
 ## Not (yet) ported
 
 - Live refresh (`r`). Currently fetches once at startup.
+
+## Releasing
+
+Maintainers: see [RELEASING.md](RELEASING.md) for how to cut a new version and
+publish it to the Homebrew tap.
