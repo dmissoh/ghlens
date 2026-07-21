@@ -26,7 +26,8 @@ const USAGE: &str = "usage: ghlens [filter] [owner/repo]\n       \
     filter        initial filter (branch, actor, detail, issue/PR number); edit it live in the TUI\n  \
     owner/repo    omitted -> current directory's GitHub repo (via `gh repo view`)\n  \
     -R, --repo    explicit repo (same as the 2nd positional)\n  \
-    --host HOST   GitHub Enterprise host (auto-detected for the current repo)";
+    --host HOST   GitHub Enterprise host (auto-detected for the current repo)\n  \
+    -V, --version print version and exit";
 
 // Filter targets = render columns. 0 (All) matches the combined haystack and has
 // no visible column; 1..=4 map to the Date/Type/Actor/Detail cells.
@@ -348,6 +349,10 @@ fn resolve_args() -> Result<Cli, String> {
             "--host" => host = args.next(),
             "-R" | "--repo" => repo_flag = args.next(),
             "-h" | "--help" => return Err(USAGE.into()),
+            "-V" | "--version" => {
+                println!("ghlens {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             _ => pos.push(a),
         }
     }
