@@ -19,9 +19,22 @@ cargo build --release        # -> target/release/ghlens
 cargo test --release         # render + filter smoke tests
 ```
 
-## Deploy (use it everywhere)
+## Install
 
-Install the binary onto your PATH:
+### Homebrew
+
+Builds from source (needs Rust) and pulls in `gh` as a runtime dependency.
+Until a tagged release exists, install the HEAD formula straight from the repo:
+
+```sh
+brew install --HEAD https://raw.githubusercontent.com/dmissoh/ghlens/main/Formula/ghlens.rb
+```
+
+For the nicer `brew install dmissoh/ghlens/ghlens`, publish `Formula/ghlens.rb`
+to a tap repo named `dmissoh/homebrew-ghlens`, then `brew tap dmissoh/ghlens &&
+brew install --HEAD ghlens` (drop `--HEAD` once the formula has a tagged `url` + `sha256`).
+
+### From source
 
 ```sh
 cargo install --path .       # copies to ~/.cargo/bin/ghlens
@@ -29,9 +42,7 @@ cargo install --path .       # copies to ~/.cargo/bin/ghlens
 
 `~/.cargo/bin` is on PATH by default, so `ghlens` then works from any folder. It is a
 standalone native binary (not a symlink into this repo), so it keeps working even if
-you move or clean the source dir.
-
-After changing the code, re-run `cargo install --path .` to refresh the installed copy.
+you move or clean the source dir. Re-run after changing the code to refresh the copy.
 
 ## Run
 
@@ -58,9 +69,10 @@ Piped (not a terminal) it prints the filtered rows instead of the TUI, so
 | Tab / Shift-Tab | switch the active filter column (All → Date → Type → Actor → Detail) |
 | ↑ ↓ / PgUp PgDn / Home End | navigate |
 | Enter | on a push (▸) row: expand/collapse its commit subjects (the old `-c`) |
+| Ctrl-C | copy the selected line to the clipboard (tab-separated; a `↳` row copies the commit) |
 | Ctrl-O | open the selected row on GitHub: a `↳` commit row opens that exact commit, a PR/issue row opens it by number, a push/branch row opens the branch (`gh browse`) |
 | Esc | clear all filters, or quit when none are set |
-| Ctrl-C | quit |
+| Ctrl-Q | quit |
 
 ### Mouse
 

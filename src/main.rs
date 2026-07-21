@@ -236,6 +236,7 @@ struct App {
     spark_days: Vec<String>, // day under each bar column, for click-to-jump
     drag: Option<(usize, u16)>,       // (render col, its left x) while resizing
     last_click: Option<(Instant, usize)>, // for double-click detection
+    status: Option<String>,           // transient footer message (e.g. "copied")
 }
 
 impl App {
@@ -251,6 +252,7 @@ impl App {
             spark_days: Vec::new(),
             drag: None,
             last_click: None,
+            status: None,
         };
         app.reset_sel();
         app
@@ -428,11 +430,57 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
     }
 }
 
+// Plain-text form of a visible row, for copying to the clipboard.
+fn line_text(app: &App, row: Row) -> String {
+    match row {
+        Row::Event(i) => {
+            let e = &app.events[i];
+            format!("{} {}\t{}\t{}\t{}", e.day, e.time, e.label, e.actor, e.detail)
+        }
+        Row::Commit(i, c) => app.events[i].commits.as_ref().unwrap()[c].clone(),
+    }
+}
+
+// Copy via the platform clipboard tool. No dep: pbcopy (macOS), then wl-copy /
+// xclip (Linux). Returns false if none is available.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    let tools: [(&str, &[&str]); 3] =
+        [("pbcopy", &[]), ("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])];
+    for (tool, args) in tools {
+        let child = Command::new(tool)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            if let Some(mut si) = child.stdin.take() {
+                let _ = si.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return true;
+        }
+    }
+    false
+}
+
 // Returns true to quit.
 fn handle_key(app: &mut App, k: event::KeyEvent) -> bool {
+    app.status = None; // any keypress dismisses the last transient message
     let len = app.visible().len();
     match (k.modifiers, k.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => return true,
+        (KeyModifiers::CONTROL, KeyCode::Char('q')) => return true,
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            if let Some(row) = app.state.selected().and_then(|s| app.visible().get(s).copied()) {
+                let text = line_text(app, row);
+                app.status = Some(if copy_to_clipboard(&text) {
+                    "copied".into()
+                } else {
+                    "no clipboard tool (pbcopy/wl-copy/xclip)".into()
+                });
+            }
+        }
         (_, KeyCode::Esc) => {
             // Clear every filter (not just the active one): quitting while a
             // filter on another column silently hides rows is a trap.
@@ -787,8 +835,11 @@ fn ui(f: &mut Frame, app: &mut App) {
             fspans.push(Span::styled(format!("  {}:{}", COLS[c], fl), Style::default().fg(Color::Cyan)));
         }
     }
+    if let Some(st) = &app.status {
+        fspans.push(Span::styled(format!("   ✓ {st}"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+    }
     let help = Line::from(Span::styled(
-        " type to filter · Tab: switch filter column · Enter: commits · ^O: open in browser · drag │: resize · Esc: clear filters · ^C: quit",
+        " type: filter · Tab: switch column · Enter: commits · ^C: copy line · ^O: open in browser · drag │: resize · Esc: clear · ^Q: quit",
         Style::default().fg(Color::DarkGray),
     ));
     f.render_widget(Paragraph::new(vec![Line::from(fspans), help]), chunks[3]);
@@ -827,7 +878,7 @@ mod tests {
         assert!(dump.contains("full bar ="), "sparkline scale title missing");
         assert!(dump.contains("2026-07-18") && dump.contains("2026-07-20"), "date axis missing");
         assert!(dump.contains("Detail"), "column header missing");
-        assert!(dump.contains("type to filter"), "help line missing");
+        assert!(dump.contains("copy line"), "help line missing");
     }
 
     // Clicking a sparkline bar selects that day's first row.
@@ -902,6 +953,18 @@ mod tests {
         let dump = draw(&mut app, 90, 20);
         assert!(dump.contains("first"), "commit subject rendered");
         assert!(dump.contains('▾'), "expanded marker rendered");
+    }
+
+    // Copy text: event rows are tab-separated fields; commit rows copy verbatim.
+    #[test]
+    fn copy_line_text() {
+        let mut app = sample();
+        assert_eq!(
+            line_text(&app, Row::Event(1)),
+            "2026-07-19 09:00\tPullRequest\talice\topened #1387"
+        );
+        app.events[0].commits = Some(vec!["abc1234  first".into()]);
+        assert_eq!(line_text(&app, Row::Commit(0, 0)), "abc1234  first");
     }
 
     // Column resize hit-test: dragging col 2's right edge updates only its width.
