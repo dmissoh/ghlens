@@ -69,6 +69,7 @@ Piped (not a terminal) it prints the filtered rows instead of the TUI, so
 | Tab / Shift-Tab | switch the active filter column (All → Date → Type → Actor → Detail) |
 | ↑ ↓ / PgUp PgDn / Home End | navigate |
 | Enter | on a push (▸) row: expand/collapse its commit subjects (the old `-c`) |
+| Ctrl-F | focus the selected row's branch (or its `#number`): sets one `All` filter to it and clears the rest |
 | Ctrl-C | copy the selected line to the clipboard (tab-separated; a `↳` row copies the commit) |
 | Ctrl-O | open the selected row on GitHub: a `↳` commit row opens that exact commit, a PR/issue row opens it by number, a push/branch row opens the branch (`gh browse`) |
 | Esc | clear all filters, or quit when none are set |
@@ -95,10 +96,22 @@ and clicking a bar jumps the list to that day.
 
 ### Filtering
 
-Each column has its own filter; a row shows only if it matches **all** non-empty
-filters. `All` matches the combined haystack (branch, actor, detail, PR head branch,
-issue/PR number). The active column is highlighted in the header and named in the
-footer, e.g. `filter[Actor]:`. The CLI `filter` arg seeds the `All` filter.
+Filters combine in two ways:
+
+- **Within a box, space-separated terms AND together.** `push alice` shows pushes
+  by alice; order does not matter. A branch name (no spaces) is a single term.
+- **Across columns, filters AND together.** Tab to another column and add a term
+  there to narrow further. `All` matches the combined haystack (branch, actor,
+  detail, PR head branch, issue/PR number); the other columns match just their cell.
+
+The active column is highlighted in the header and named in the footer, e.g.
+`filter[Actor]:`; other set filters show as chips. The CLI `filter` arg seeds `All`.
+
+**Pick a branch, then see its whole history.** Run `ghlens` with no filter, set the
+`Type` filter to `branch_creation` (Tab to Type, type `branch`) to list new branches,
+select the one you want, and press **Ctrl-F**. That replaces the filters with a single
+`All` filter for that branch, so you immediately see its creation, pushes, PR, and
+comments. Ctrl-F on a PR/issue row focuses its `#number` instead.
 
 Push rows are marked `▸` (collapsed) / `▾` (expanded); click the arrow (or press
 Enter / double-click) to expand. Expanding fetches that push's commits via one

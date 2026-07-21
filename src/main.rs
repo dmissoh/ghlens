@@ -94,7 +94,7 @@ impl Ev {
         ok(&self.before) && ok(&self.after)
     }
 
-    // Text of column `col` (1..=4) for per-column filtering / display, lowercased.
+    // Text of column `col` (1..=4) for per-column filtering / display.
     fn cell(&self, col: usize) -> String {
         match col {
             1 => format!("{} {}", self.day, self.time),
@@ -102,6 +102,20 @@ impl Ev {
             3 => self.actor.clone(),
             _ => self.detail.clone(),
         }
+    }
+
+    // What to filter by when the user "focuses" this row (Ctrl-F): an issue/PR
+    // number if the detail carries one, else the branch/detail. Filtering the
+    // combined haystack by this pulls in the whole thread (the branch's pushes,
+    // its PR by head branch, comments by number).
+    fn filter_key(&self) -> String {
+        if let Some(rest) = self.detail.split('#').nth(1) {
+            let num: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if !num.is_empty() {
+                return num;
+            }
+        }
+        self.detail.clone()
     }
 }
 
@@ -267,13 +281,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
+                // A row passes when, for every column, all space-separated terms
+                // are present (AND). Columns AND together too. Empty filter = pass.
                 self.filters.iter().enumerate().all(|(col, f)| {
-                    if f.is_empty() {
-                        return true;
-                    }
-                    let f = f.to_lowercase();
                     let hay = if col == 0 { e.search.clone() } else { e.cell(col).to_lowercase() };
-                    hay.contains(&f)
+                    f.split_whitespace().all(|tok| hay.contains(&tok.to_lowercase()))
                 })
             })
             .map(|(i, _)| i)
@@ -507,6 +519,22 @@ fn handle_key(app: &mut App, k: event::KeyEvent) -> bool {
         (_, KeyCode::Enter) => {
             if let Some(Row::Event(i)) = app.state.selected().and_then(|s| app.visible().get(s).copied()) {
                 app.toggle_expand(i);
+            }
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+            // Focus the selected row's branch/PR: replace all filters with one All
+            // filter for its key. Turns "browsing branch_creation rows" into
+            // "the whole history of the branch I just picked" in one keystroke.
+            if let Some(row) = app.state.selected().and_then(|s| app.visible().get(s).copied()) {
+                let i = match row {
+                    Row::Event(i) | Row::Commit(i, _) => i,
+                };
+                let key = app.events[i].filter_key();
+                app.filters = Default::default();
+                app.filters[0] = key.clone();
+                app.active = 0;
+                app.reset_sel();
+                app.status = Some(format!("focused: {key}"));
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
@@ -870,7 +898,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         fspans.push(Span::styled(format!("   ✓ {st}"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
     }
     let help = Line::from(Span::styled(
-        " type: filter · Tab: switch column · Enter or click ▸: commits · ^C: copy line · ^O: open in browser · drag │: resize · Esc: clear · ^Q: quit",
+        " type: filter (space = AND) · Tab: column · ^F: focus this branch · Enter/▸: commits · ^C: copy · ^O: browser · drag │: resize · Esc: clear · ^Q: quit",
         Style::default().fg(Color::DarkGray),
     ));
     f.render_widget(Paragraph::new(vec![Line::from(fspans), help]), chunks[3]);
@@ -894,6 +922,10 @@ mod tests {
         App::new("o/r".into(), None, events, String::new())
     }
 
+    fn key(m: KeyModifiers, c: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(c, m)
+    }
+
     fn draw(app: &mut App, w: u16, h: u16) -> String {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| ui(f, app)).unwrap();
@@ -909,7 +941,7 @@ mod tests {
         assert!(dump.contains("full bar ="), "sparkline scale title missing");
         assert!(dump.contains("2026-07-18") && dump.contains("2026-07-20"), "date axis missing");
         assert!(dump.contains("Detail"), "column header missing");
-        assert!(dump.contains("copy line"), "help line missing");
+        assert!(dump.contains("focus this branch"), "help line missing");
     }
 
     // Clicking a sparkline bar selects that day's first row.
@@ -937,6 +969,45 @@ mod tests {
         app.filters[0] = "1387".into();
         assert_eq!(app.filtered().len(), 2);
         draw(&mut app, 60, 16);
+    }
+
+    // Space-separated terms in one box AND together.
+    #[test]
+    fn and_tokens_in_one_box() {
+        let mut app = sample();
+        app.filters[0] = "push alice".into(); // both must be present
+        assert_eq!(app.filtered().len(), 1);
+        app.filters[0] = "push nobody".into();
+        assert!(app.filtered().is_empty());
+        // order-independent
+        app.filters[0] = "alice push".into();
+        assert_eq!(app.filtered().len(), 1);
+    }
+
+    // filter_key: branch rows -> the branch; #-number rows -> the number.
+    #[test]
+    fn filter_key_picks_branch_or_number() {
+        let app = sample();
+        assert_eq!(app.events[0].filter_key(), "feature/1387-search"); // push row
+        assert_eq!(app.events[1].filter_key(), "1387"); // "opened #1387"
+        assert_eq!(app.events[2].filter_key(), "feature/x"); // branch_creation
+    }
+
+    // Ctrl-F focuses the selected row's branch: one All filter, others cleared.
+    #[test]
+    fn ctrl_f_focuses_branch() {
+        let mut app = sample();
+        app.filters[2] = "branch_creation".into(); // pretend we were browsing creations
+        app.active = 2;
+        app.state.select(Some(0)); // the branch_creation row (index 2 -> visible pos?)
+        // Point selection at the branch_creation event via its visible position.
+        let pos = app.visible().iter().position(|r| matches!(r, Row::Event(2))).unwrap();
+        app.state.select(Some(pos));
+        let quit = handle_key(&mut app, key(KeyModifiers::CONTROL, KeyCode::Char('f')));
+        assert!(!quit);
+        assert_eq!(app.active, 0, "focus switches to the All column");
+        assert_eq!(app.filters[0], "feature/x", "All filter set to the branch");
+        assert!(app.filters[2].is_empty(), "the type filter was cleared");
     }
 
     // Per-column filter narrows on one column only.
