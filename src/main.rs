@@ -55,8 +55,20 @@ fn classify(kind: &str) -> (char, Color) {
         ('◆', Color::Blue)
     } else if has("Release") {
         ('⚑', Color::Green)
+    } else if has("review") {
+        ('⊙', Color::Magenta)
     } else {
         ('↑', Color::Cyan)
+    }
+}
+
+// Timeline review-event -> human verb. None = not a reviewer-request event we show.
+fn review_verb(event: &str) -> Option<&'static str> {
+    match event {
+        "review_requested" => Some("requested"),
+        "review_request_removed" => Some("unrequested"),
+        "review_dismissed" => Some("dismissed"),
+        _ => None,
     }
 }
 
@@ -182,6 +194,34 @@ fn fetch_commits(host: &Option<String>, repo: &str, before: &str, after: &str) -
     (rows, Some(total))
 }
 
+// Reviewer request/removal/dismissal rows for one PR. GitHub's /events and
+// /activity feeds omit these entirely; they live only in the per-PR timeline,
+// so this costs one extra call per PR (see build_events for the bounded caller).
+// ponytail: sequential per PR; parallelize with threads if startup drags.
+fn fetch_reviews(host: &Option<String>, repo: &str, pr: i64) -> Vec<Ev> {
+    let Ok(vals) = gh_lines(host, &format!("repos/{repo}/issues/{pr}/timeline?per_page=100")) else {
+        return Vec::new();
+    };
+    let mut evs = Vec::new();
+    for v in vals {
+        let event = s(&v, "event");
+        let Some(verb) = review_verb(&event) else { continue };
+        let actor = s(v.get("actor").unwrap_or(&Value::Null), "login");
+        let actor = if actor.is_empty() { "?".into() } else { actor };
+        // requested_reviewer is a user; requested_team is a team; dismissals have neither.
+        let who = v.pointer("/requested_reviewer/login").and_then(Value::as_str)
+            .or_else(|| v.pointer("/requested_team/slug").and_then(Value::as_str))
+            .unwrap_or("");
+        let detail = if who.is_empty() {
+            format!("{verb} review #{pr}")
+        } else {
+            format!("{verb} {who} #{pr}")
+        };
+        evs.push(Ev::new(s(&v, "created_at"), actor, &event, "Review".into(), detail, &pr.to_string()));
+    }
+    evs
+}
+
 fn build_events(repo: &str, host: &Option<String>) -> Result<Vec<Ev>, String> {
     let mut evs = Vec::new();
 
@@ -199,6 +239,7 @@ fn build_events(repo: &str, host: &Option<String>) -> Result<Vec<Ev>, String> {
 
     // /events: the types /activity lacks. Best-effort (thin feeds add little).
     // Skip Push/Create/Delete: /activity already covers them, deeper.
+    let mut pr_nums: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     if let Ok(vals) = gh_lines(host, &format!("repos/{repo}/events?per_page=100")) {
         for v in vals {
             let ty = s(&v, "type");
@@ -209,6 +250,9 @@ fn build_events(repo: &str, host: &Option<String>) -> Result<Vec<Ev>, String> {
             let action = s(&p, "action");
             let issue_num = p.pointer("/issue/number").and_then(Value::as_i64);
             let pr_num = p.pointer("/pull_request/number").and_then(Value::as_i64);
+            if let Some(n) = pr_num {
+                pr_nums.insert(n);
+            }
             let head = p.pointer("/pull_request/head/ref").and_then(Value::as_str).unwrap_or("");
             let detail = match ty.as_str() {
                 "ForkEvent" => format!("-> {}", p.pointer("/forkee/full_name").and_then(Value::as_str).unwrap_or("")),
@@ -228,6 +272,12 @@ fn build_events(repo: &str, host: &Option<String>) -> Result<Vec<Ev>, String> {
             let extra = format!("{head} {num}");
             evs.push(Ev::new(s(&v, "created_at"), actor, &ty, label, detail, &extra));
         }
+    }
+
+    // Reviewer requests live only in each PR's timeline, never the feeds above.
+    // Bounded to PRs already seen in /events (one extra call apiece).
+    for pr in pr_nums {
+        evs.extend(fetch_reviews(host, repo, pr));
     }
 
     evs.sort_by(|a, b| b.ts.cmp(&a.ts)); // newest first
@@ -930,6 +980,18 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| ui(f, app)).unwrap();
         t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    // Reviewer-request timeline events map to verbs and a distinct review glyph,
+    // and don't collide with the capital-R PullRequestReview* feed types.
+    #[test]
+    fn review_events_classify() {
+        assert_eq!(review_verb("review_requested"), Some("requested"));
+        assert_eq!(review_verb("review_request_removed"), Some("unrequested"));
+        assert_eq!(review_verb("review_dismissed"), Some("dismissed"));
+        assert_eq!(review_verb("committed"), None);
+        assert_eq!(classify("review_requested").0, '⊙');
+        assert_eq!(classify("PullRequestReviewEvent").0, '⇄'); // stays PR-magenta, not ⊙
     }
 
     #[test]
