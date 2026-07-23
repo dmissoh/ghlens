@@ -305,6 +305,7 @@ struct App {
     drag: Option<(usize, u16)>,       // (render col, its left x) while resizing
     last_click: Option<(Instant, usize)>, // for double-click detection
     status: Option<String>,           // transient footer message (e.g. "copied")
+    focus_undo: Vec<[String; 5]>,     // filter states saved before each ^F focus; Esc pops one
 }
 
 impl App {
@@ -321,6 +322,7 @@ impl App {
             drag: None,
             last_click: None,
             status: None,
+            focus_undo: Vec::new(),
         };
         app.reset_sel();
         app
@@ -556,13 +558,19 @@ fn handle_key(app: &mut App, k: event::KeyEvent) -> bool {
             }
         }
         (_, KeyCode::Esc) => {
-            // Clear every filter (not just the active one): quitting while a
-            // filter on another column silently hides rows is a trap.
-            if app.filters.iter().all(|f| f.is_empty()) {
+            // Undo the last ^F focus if one is stacked; else clear every filter
+            // (not just the active one), else quit. Clearing all matters: a
+            // stray filter on another column silently hides rows.
+            if let Some(prev) = app.focus_undo.pop() {
+                app.filters = prev;
+                app.reset_sel();
+                app.status = Some("unfocused".into());
+            } else if app.filters.iter().all(|f| f.is_empty()) {
                 return true;
+            } else {
+                app.filters.iter_mut().for_each(String::clear);
+                app.reset_sel();
             }
-            app.filters.iter_mut().for_each(String::clear);
-            app.reset_sel();
         }
         (_, KeyCode::Tab) => app.active = (app.active + 1) % COLS.len(),
         (_, KeyCode::BackTab) => app.active = (app.active + COLS.len() - 1) % COLS.len(),
@@ -580,6 +588,7 @@ fn handle_key(app: &mut App, k: event::KeyEvent) -> bool {
                     Row::Event(i) | Row::Commit(i, _) => i,
                 };
                 let key = app.events[i].filter_key();
+                app.focus_undo.push(app.filters.clone()); // so Esc can undo this focus
                 app.filters = Default::default();
                 app.filters[0] = key.clone();
                 app.active = 0;
@@ -612,10 +621,12 @@ fn handle_key(app: &mut App, k: event::KeyEvent) -> bool {
         (_, KeyCode::End) => app.move_sel(isize::MAX / 2, len),
         (_, KeyCode::Backspace) => {
             app.filters[app.active].pop();
+            app.focus_undo.clear(); // typing your own filter ends the focus-undo trail
             app.reset_sel();
         }
         (m, KeyCode::Char(c)) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
             app.filters[app.active].push(c);
+            app.focus_undo.clear();
             app.reset_sel();
         }
         _ => {}
@@ -948,7 +959,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         fspans.push(Span::styled(format!("   ✓ {st}"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
     }
     let help = Line::from(Span::styled(
-        " type: filter (space = AND) · Tab: column · ^F: focus this branch · Enter/▸: commits · ^C: copy · ^O: browser · drag │: resize · Esc: clear · ^Q: quit",
+        " type: filter (space = AND) · Tab: column · ^F: focus this branch · Enter/▸: commits · ^C: copy · ^O: browser · drag │: resize · Esc: unfocus/clear · ^Q: quit",
         Style::default().fg(Color::DarkGray),
     ));
     f.render_widget(Paragraph::new(vec![Line::from(fspans), help]), chunks[3]);
@@ -1070,6 +1081,43 @@ mod tests {
         assert_eq!(app.active, 0, "focus switches to the All column");
         assert_eq!(app.filters[0], "feature/x", "All filter set to the branch");
         assert!(app.filters[2].is_empty(), "the type filter was cleared");
+    }
+
+    // Esc after ^F undoes the focus (restores the prior filters), not a full clear.
+    // A second Esc then does the normal clear-all; a third quits.
+    #[test]
+    fn esc_undoes_last_focus() {
+        let mut app = sample();
+        app.filters[2] = "branch_creation".into(); // the pre-focus state we expect back
+        app.active = 2;
+        let pos = app.visible().iter().position(|r| matches!(r, Row::Event(2))).unwrap();
+        app.state.select(Some(pos));
+        handle_key(&mut app, key(KeyModifiers::CONTROL, KeyCode::Char('f')));
+        assert_eq!(app.filters[0], "feature/x", "focused");
+
+        // First Esc: undo the focus -> prior filters restored, not cleared.
+        assert!(!handle_key(&mut app, key(KeyModifiers::NONE, KeyCode::Esc)));
+        assert_eq!(app.filters[2], "branch_creation", "prior filter restored");
+        assert!(app.filters[0].is_empty(), "focus filter gone");
+        assert!(app.focus_undo.is_empty(), "undo stack consumed");
+
+        // Second Esc: normal clear-all. Third: quit.
+        assert!(!handle_key(&mut app, key(KeyModifiers::NONE, KeyCode::Esc)));
+        assert!(app.filters.iter().all(String::is_empty), "all cleared");
+        assert!(handle_key(&mut app, key(KeyModifiers::NONE, KeyCode::Esc)), "empty Esc quits");
+    }
+
+    // Typing your own filter after a focus ends the undo trail: Esc then clears.
+    #[test]
+    fn typing_ends_focus_undo() {
+        let mut app = sample();
+        let pos = app.visible().iter().position(|r| matches!(r, Row::Event(2))).unwrap();
+        app.state.select(Some(pos));
+        handle_key(&mut app, key(KeyModifiers::CONTROL, KeyCode::Char('f')));
+        handle_key(&mut app, key(KeyModifiers::NONE, KeyCode::Char('x'))); // manual edit
+        assert!(app.focus_undo.is_empty(), "manual edit clears the undo stack");
+        assert!(!handle_key(&mut app, key(KeyModifiers::NONE, KeyCode::Esc)));
+        assert!(app.filters.iter().all(String::is_empty), "Esc now clears, not undoes");
     }
 
     // Per-column filter narrows on one column only.

@@ -1,6 +1,6 @@
 [package]
 name = "ghlens"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A terminal UI for browsing a GitHub repo's event history: activity chart, live per-column filters, and commit drill-down."
 repository = "https://github.com/dmissoh/ghlens"
